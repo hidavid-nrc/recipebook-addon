@@ -1,0 +1,15 @@
+{
+  "name": "Recipe Book Addons",
+  "url": "https://github.com/hidavid-nrc/recipebook-addon",
+  "maintainer": "David",
+  "addons": [
+    {
+      "name": "Recipe Book",
+      "slug": "recipe_book",
+      "description": "Personal recipe library with AI search, meal planning, and Bring! integration",
+      "url": "https://github.com/hidavid-nrc/recipebook-addon",
+      "icon": false,
+      "logo": false
+    }
+  ]
+}
