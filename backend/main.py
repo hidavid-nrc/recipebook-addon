@@ -4,7 +4,7 @@ from fastapi.responses import HTMLResponse
 from pathlib import Path
 
 from .db import init_db
-from .routers import recipes, ingest, planner, preferences, voice
+from .routers import recipes, ingest, planner, preferences, voice, proxy
 
 # HA ingress injects X-Ingress-Path header — we use it as root_path
 # so all /api/... calls work correctly from the browser under ingress
@@ -33,3 +33,4 @@ app.mount("/static", StaticFiles(directory=str(FRONTEND / "static")), name="stat
 @app.get("/{full_path:path}", response_class=HTMLResponse)
 async def spa(full_path: str = ""):
     return HTMLResponse((FRONTEND / "index.html").read_text())
+app.include_router(proxy.router,       prefix="/api/proxy")

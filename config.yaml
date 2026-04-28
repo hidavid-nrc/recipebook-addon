@@ -1,6 +1,6 @@
 name: "Recipe Book"
 description: "Personal recipe library — AI search, meal planning, Bring! integration"
-version: "0.3.4"
+version: "0.3.6"
 slug: "recipe_book"
 init: false
 arch:
