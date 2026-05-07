@@ -45,8 +45,13 @@ body{background:var(--paper);color:var(--ink);font-family:'Lato',sans-serif;font
 .btn-green:hover{background:#225238}
 .btn-red{background:transparent;color:var(--accent);border-color:var(--accent)}
 .section-label{font-size:.6rem;letter-spacing:.2em;text-transform:uppercase;color:var(--accent);font-weight:700;margin-bottom:.6rem}
+/* ── TAG SYSTEM ── */
 .tag{font-size:.58rem;font-weight:700;letter-spacing:.07em;text-transform:uppercase;
   padding:.15rem .45rem;border-radius:2px;background:var(--cream);color:var(--mid)}
+.tag-cuisine{font-size:.58rem;font-weight:700;letter-spacing:.07em;text-transform:uppercase;
+  padding:.15rem .5rem;border-radius:2px;color:#fff}
+.tag-type{font-size:.55rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
+  padding:.1rem .38rem;border-radius:2px;background:var(--cream);color:var(--muted)}
 .status{font-size:.7rem;padding:.35rem .6rem;border-radius:3px;margin-top:.4rem;display:none}
 .status.ok{background:#eef7f2;color:var(--green);display:block}
 .status.err{background:#fef0ec;color:var(--accent);display:block}
@@ -112,7 +117,7 @@ textarea.text-input{min-height:90px;resize:vertical}
 .step-row{display:flex;gap:.85rem;margin-bottom:1.1rem;padding-bottom:1.1rem;border-bottom:1px solid var(--rule)}
 .step-row:last-child{border-bottom:none;margin-bottom:0}
 .step-num{font-family:'Playfair Display',serif;font-size:1.4rem;color:var(--accent);line-height:1;flex-shrink:0;width:1.6rem;text-align:right}
-.step-text{font-size:.8rem;line-height:1.72}
+.step-text{font-size:.8rem;line-height:1.72;-webkit-user-select:none;user-select:none}
 .step-timer{display:inline-block;background:var(--cream);border:1px solid var(--rule);border-radius:2px;
   padding:.08rem .35rem;font-size:.62rem;font-weight:700;letter-spacing:.07em;color:var(--mid);margin-left:.35rem}
 .sidebar-card{background:var(--white);border:1px solid var(--rule);border-radius:3px;padding:.85rem;margin-bottom:.85rem}
@@ -402,18 +407,42 @@ function nav(name){
 async function loadCatalog(){
   try{
     recipes=await api.get('/api/recipes');
-    renderCatalog(recipes); renderTags();
+    renderCatalog(recipes); renderFilterTags();
   }catch(e){console.error(e)}
 }
 
-function renderTags(){
+const CUISINES={
+  japanese:'#c0392b', thai:'#27ae60', mexican:'#e67e22', chinese:'#8e44ad',
+  french:'#2980b9', italian:'#16a085', korean:'#d35400', indian:'#f39c12',
+  austrian:'#7f8c8d', vietnamese:'#1abc9c', turkish:'#e74c3c', american:'#2c3e50',
+  middleeastern:'#f1c40f', lebanese:'#f1c40f', greek:'#3498db'
+};
+const CUISINE_TAGS=new Set(Object.keys(CUISINES));
+
+function cuisineOf(tags){
+  if(!tags) return null;
+  return tags.find(t=>CUISINE_TAGS.has(t.toLowerCase().replace(/[\s-]/g,'')));
+}
+
+function renderTags(tags){
+  if(!tags?.length) return '';
+  const cuisine=cuisineOf(tags);
+  const types=tags.filter(t=>t!==cuisine).slice(0,3);
+  const cc=cuisine?CUISINES[cuisine.toLowerCase().replace(/[\s-]/g,'')]||'#888':null;
+  return `<div class="card-tags" style="display:flex;flex-wrap:wrap;gap:.25rem;align-items:center">
+    ${cc?`<span class="tag-cuisine" style="background:${cc}">${cuisine}</span>`:''}
+    ${types.map(t=>`<span class="tag-type">${t}</span>`).join('')}
+  </div>`;
+}
+
+function renderFilterTags(){
   const all=[...new Set(recipes.flatMap(r=>r.tags||[]))].sort();
   document.getElementById('tag-filter').innerHTML=all.map(t=>
     `<button class="tag-chip ${activeTags.has(t)?'active':''}" onclick="toggleTag('${t}')">${t}</button>`
   ).join('');
 }
 
-function toggleTag(t){activeTags.has(t)?activeTags.delete(t):activeTags.add(t); filterCatalog(); renderTags();}
+function toggleTag(t){activeTags.has(t)?activeTags.delete(t):activeTags.add(t); filterCatalog(); renderFilterTags();}
 
 function filterCatalog(){
   const q=document.getElementById('q').value.toLowerCase();
@@ -434,11 +463,11 @@ function renderCatalog(list){
   g.innerHTML=list.map(r=>`
     <div class="recipe-card" onclick="openRecipe('${r.slug}')">
       <div class="card-body">
-        ${r.source?`<div class="card-source">${x(r.source)}</div>`:''}
+        ${r.source?`<div class="card-source">${x(r.source.split('·')[0].split('—')[0].trim())}</div>`:''}
         <div class="card-name">${x(r.name)}</div>
         <div class="card-meta">${ingCount(r)} ingredients</div>
       </div>
-      ${r.tags?.length?`<div class="card-tags">${r.tags.slice(0,4).map(t=>`<span class="tag">${t}</span>`).join('')}</div>`:''}
+      ${r.tags?.length?renderTags(r.tags):''}
     </div>`).join('');
 }
 
@@ -486,9 +515,14 @@ function renderDetail(r){
 
   document.getElementById('detail-side').innerHTML=`
     <div class="sidebar-card">
+      <div class="section-label">Cuisine</div>
+      <div style="display:flex;flex-wrap:wrap;gap:.3rem;margin-bottom:.6rem">
+        ${(()=>{const c=cuisineOf(d.tags);const cc=c?CUISINES[c.toLowerCase().replace(/[\s-]/g,'')]||'#888':null;
+          return c?`<span class="tag-cuisine" style="background:${cc}">${c}</span>`:'<span style="font-size:.72rem;color:var(--muted)">—</span>';})()}
+      </div>
       <div class="section-label">Tags</div>
-      <div style="display:flex;flex-wrap:wrap;gap:.3rem">
-        ${(d.tags||[]).map(t=>`<span class="tag">${t}</span>`).join('')||'<span style="font-size:.72rem;color:var(--muted)">None</span>'}
+      <div style="display:flex;flex-wrap:wrap;gap:.25rem">
+        ${(d.tags||[]).filter(t=>t!==cuisineOf(d.tags)).map(t=>`<span class="tag-type" style="background:var(--cream);color:var(--mid);padding:.15rem .45rem">${t}</span>`).join('')||'<span style="font-size:.72rem;color:var(--muted)">None</span>'}
       </div>
     </div>
     <div class="sidebar-card">
