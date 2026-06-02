@@ -388,6 +388,27 @@ textarea.text-input{min-height:90px;resize:vertical}
     </div>
     <div id="epub-log" style="background:#111;color:#c8c0a8;font-family:'IBM Plex Mono',monospace;font-size:.7rem;padding:.75rem;border-radius:6px;height:280px;overflow-y:auto;line-height:1.5"></div>
   </div>
+
+  <!-- ZIP Import -->
+  <div style="margin-top:1.5rem">
+    <div class="section-label">JSON ZIP Import</div>
+    <p style="font-size:.78rem;color:var(--muted);margin-bottom:.75rem">Import a ZIP of JSON recipe files exported from the browser extractor tool.</p>
+    <div style="background:var(--surface);border-radius:8px;padding:1rem;display:flex;flex-wrap:wrap;gap:.75rem;align-items:flex-end">
+      <div style="flex:2;min-width:200px">
+        <label style="font-size:.65rem;color:var(--muted);display:block;margin-bottom:.2rem">ZIP File</label>
+        <input type="file" id="zip-file" accept=".zip" style="font-size:.8rem;color:var(--paper)">
+      </div>
+      <div style="flex:1;min-width:150px">
+        <label style="font-size:.65rem;color:var(--muted);display:block;margin-bottom:.2rem">Source label</label>
+        <input type="text" id="zip-source" placeholder="e.g. The Wok — Kenji"
+          style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:.35rem .5rem;color:var(--paper);font-size:.8rem">
+      </div>
+      <div>
+        <button class="btn btn-primary" id="zip-import-btn" onclick="startZipImport()">⬆ Import ZIP</button>
+      </div>
+    </div>
+    <div id="zip-st" style="font-size:.78rem;margin-top:.5rem;color:var(--muted)"></div>
+  </div>
 </div>
 
 </div><!-- .app -->
@@ -1018,121 +1039,128 @@ function setSt(key,msg,type){
   el.className=`status ${type}`;el.textContent=msg;
 }
 
-// ── EPUB Import ───────────────────────────────────────────────────────────────
-let epubAbortController = null;
+// ── EPUB / ZIP Import ─────────────────────────────────────────────────────────
+let epubJobId = null;
+let epubPollTimer = null;
+let epubLogOffset = 0;
+
+function epubLog(msg, level) {
+  const log = document.getElementById('epub-log');
+  const d = document.createElement('div');
+  const colors = {ok:'#7fc47f', error:'#e87070', done:'#e8c070', info:'#c8c0a8'};
+  d.style.color = colors[level] || '#c8c0a8';
+  d.textContent = '> ' + msg;
+  log.appendChild(d);
+  log.scrollTop = log.scrollHeight;
+}
 
 async function startEpubImport() {
   const fileInput = document.getElementById('epub-file');
-  if (!fileInput.files.length) { alert('Please select an EPUB file'); return; }
-
+  if (!fileInput.files.length) { alert('Select an EPUB file'); return; }
   const file = fileInput.files[0];
-  const chunkSize = document.getElementById('epub-chunk-size').value;
-  const minScore = document.getElementById('epub-min-score').value;
-  const maxChunks = document.getElementById('epub-max-chunks').value;
-  const doRepair = document.getElementById('epub-repair').checked;
-  const source = document.getElementById('epub-source').value || file.name.replace('.epub','');
+  if (!file.name.toLowerCase().endsWith('.epub')) { alert('Please select an .epub file. For JSON ZIPs use the ZIP import below.'); return; }
 
-  // UI setup
+  const source = document.getElementById('epub-source').value || file.name.replace(/\.epub$/i,'');
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('chunk_size', document.getElementById('epub-chunk-size').value);
+  formData.append('min_score', document.getElementById('epub-min-score').value);
+  formData.append('max_chunks', document.getElementById('epub-max-chunks').value);
+  formData.append('do_repair', document.getElementById('epub-repair').checked ? 'true' : 'false');
+  formData.append('source', source);
+
   document.getElementById('epub-start-btn').disabled = true;
   document.getElementById('epub-stop-btn').style.display = 'inline-block';
   document.getElementById('epub-progress-wrap').style.display = 'block';
-  const log = document.getElementById('epub-log');
-  const bar = document.getElementById('epub-progress-bar');
-  const stats = document.getElementById('epub-stats');
-  log.innerHTML = '';
-  bar.style.width = '0%';
+  document.getElementById('epub-log').innerHTML = '';
+  document.getElementById('epub-progress-bar').style.width = '0%';
+  epubLogOffset = 0;
 
-  const addLog = (msg, color = '#c8c0a8') => {
-    const d = document.createElement('div');
-    d.style.color = color;
-    d.textContent = '> ' + msg;
-    log.appendChild(d);
-    log.scrollTop = log.scrollHeight;
-  };
-
-  addLog(`Starting import: ${file.name}`);
-
-  const formData = new FormData();
-  formData.append('file', file);
-  formData.append('chunk_size', chunkSize);
-  formData.append('min_score', minScore);
-  formData.append('max_chunks', maxChunks);
-  formData.append('do_repair', doRepair ? 'true' : 'false');
-  formData.append('source', source);
-
-  epubAbortController = new AbortController();
+  epubLog(`Uploading ${file.name}...`, 'info');
 
   try {
-    const resp = await fetch('/api/ingest/epub', {
-      method: 'POST',
-      body: formData,
-      signal: epubAbortController.signal
-    });
-
-    if (!resp.ok) { addLog(`Server error: ${resp.status}`, '#e87070'); return; }
-
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let chunkCount = 0;
-    const maxChunksInt = parseInt(maxChunks);
-
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop();
-
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        try {
-          const data = JSON.parse(line.slice(6));
-          const msg = data.msg || '';
-
-          // Detect chunk progress for progress bar
-          const chunkMatch = msg.match(/^\[(\d+)\/(\d+)\]/);
-          if (chunkMatch) {
-            chunkCount = parseInt(chunkMatch[1]);
-            const total = parseInt(chunkMatch[2]);
-            bar.style.width = Math.round((chunkCount / total) * 80) + '%';
-            stats.textContent = `${chunkCount}/${total} chunks`;
-          }
-
-          // Color coding
-          let color = '#c8c0a8';
-          if (msg.includes('✓')) color = '#7fc47f';
-          else if (msg.includes('✗') || msg.includes('error')) color = '#e87070';
-          else if (msg.includes('Repair')) color = '#7ab8d4';
-          else if (msg.includes('Done!')) color = '#e8c070';
-
-          addLog(msg, color);
-
-          if (data.done) {
-            bar.style.width = '100%';
-            stats.textContent = `Imported: ${data.imported} | Skipped: ${data.skipped}`;
-            addLog(`✓ Complete — ${data.imported} recipes added to your library`, '#7fc47f');
-            loadCatalog(); // refresh catalog
-          }
-        } catch (e) { /* skip malformed SSE */ }
-      }
-    }
-  } catch (e) {
-    if (e.name === 'AbortError') {
-      addLog('Import stopped by user.', '#e8c070');
-    } else {
-      addLog(`Error: ${e.message}`, '#e87070');
-    }
-  } finally {
+    const resp = await fetch('/api/ingest/epub', { method: 'POST', body: formData });
+    if (!resp.ok) { epubLog(`Server error: ${resp.status}`, 'error'); return; }
+    const data = await resp.json();
+    epubJobId = data.job_id;
+    epubLog(`Job started: ${epubJobId}`, 'info');
+    epubPollTimer = setInterval(pollEpubJob, 1500);
+  } catch(e) {
+    epubLog(`Error: ${e.message}`, 'error');
     document.getElementById('epub-start-btn').disabled = false;
     document.getElementById('epub-stop-btn').style.display = 'none';
   }
 }
 
+async function pollEpubJob() {
+  if (!epubJobId) return;
+  try {
+    const resp = await fetch(`/api/ingest/epub/${epubJobId}?since=${epubLogOffset}`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+
+    // Render new log lines
+    for (const entry of data.log) {
+      epubLog(entry.msg, entry.level);
+    }
+    epubLogOffset = data.log_total;
+
+    // Update progress bar
+    const s = data.stats;
+    if (s.total_chunks > 0) {
+      const pct = Math.min(90, Math.round((s.chunk / s.total_chunks) * 80));
+      document.getElementById('epub-progress-bar').style.width = pct + '%';
+    }
+    document.getElementById('epub-stats').textContent =
+      s.total_chunks > 0 ? `${s.chunk}/${s.total_chunks} chunks · ${s.extracted || 0} extracted` : '';
+
+    if (data.status === 'done' || data.status === 'error') {
+      clearInterval(epubPollTimer);
+      epubPollTimer = null;
+      document.getElementById('epub-progress-bar').style.width = '100%';
+      document.getElementById('epub-stats').textContent = `Imported: ${s.imported} | Skipped: ${s.skipped}`;
+      document.getElementById('epub-start-btn').disabled = false;
+      document.getElementById('epub-stop-btn').style.display = 'none';
+      if (data.status === 'done') loadCatalog();
+    }
+  } catch(e) { /* ignore poll errors */ }
+}
+
 function stopEpubImport() {
-  if (epubAbortController) {
-    epubAbortController.abort();
-    epubAbortController = null;
+  clearInterval(epubPollTimer);
+  epubPollTimer = null;
+  epubJobId = null;
+  document.getElementById('epub-start-btn').disabled = false;
+  document.getElementById('epub-stop-btn').style.display = 'none';
+  epubLog('Stopped. Import continues server-side until current chunk finishes.', 'info');
+}
+
+// ── ZIP JSON import ───────────────────────────────────────────────────────────
+async function startZipImport() {
+  const fileInput = document.getElementById('zip-file');
+  if (!fileInput.files.length) { alert('Select a ZIP file'); return; }
+  const file = fileInput.files[0];
+  const source = document.getElementById('zip-source').value || 'ZIP Import';
+
+  document.getElementById('zip-import-btn').disabled = true;
+  const st = document.getElementById('zip-st');
+  st.textContent = 'Uploading...'; st.style.color = 'var(--muted)';
+
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('source', source);
+
+  try {
+    const resp = await fetch('/api/ingest/zip', { method: 'POST', body: formData });
+    const data = await resp.json();
+    if (!resp.ok) { st.textContent = `Error: ${data.detail || resp.status}`; st.style.color = '#e87070'; return; }
+    st.textContent = `✓ Imported: ${data.imported} | Skipped: ${data.skipped} | Errors: ${data.errors}`;
+    st.style.color = '#7fc47f';
+    loadCatalog();
+  } catch(e) {
+    st.textContent = `Error: ${e.message}`; st.style.color = '#e87070';
+  } finally {
+    document.getElementById('zip-import-btn').disabled = false;
   }
 }
 
