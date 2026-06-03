@@ -4,7 +4,7 @@ from fastapi.responses import HTMLResponse
 from pathlib import Path
 
 from .db import init_db
-from .routers import recipes, ingest, planner, preferences, voice, proxy
+from .routers import recipes, ingest, planner, preferences, voice, proxy, epub
 
 # HA ingress injects X-Ingress-Path header — we use it as root_path
 # so all /api/... calls work correctly from the browser under ingress
@@ -23,6 +23,7 @@ async def startup():
 
 app.include_router(recipes.router,     prefix="/api/recipes")
 app.include_router(ingest.router,      prefix="/api/ingest")
+app.include_router(epub.router,        prefix="/api/ingest")
 app.include_router(planner.router,     prefix="/api/planner")
 app.include_router(preferences.router, prefix="/api/preferences")
 app.include_router(voice.router,       prefix="/api/voice")
