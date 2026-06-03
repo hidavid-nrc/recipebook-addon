@@ -8,7 +8,7 @@ from .routers import recipes, ingest, planner, preferences, voice, proxy, epub
 
 # HA ingress injects X-Ingress-Path header — we use it as root_path
 # so all /api/... calls work correctly from the browser under ingress
-app = FastAPI(title="Recipe Book", version="0.3.0")
+app = FastAPI(title="Recipe Book", version="0.4.1")
 
 @app.middleware("http")
 async def ingress_root_path(request: Request, call_next):

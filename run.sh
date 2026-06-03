@@ -7,6 +7,6 @@ export DATA_DIR="/data"
 export PORT=8000
 
 # SUPERVISOR_TOKEN is auto-injected by HA when homeassistant_api: true
-bashio::log.info "Starting Recipe Book v0.3.0..."
+bashio::log.info "Starting Recipe Book v0.4.1..."
 cd /app
 exec python3 -m uvicorn backend.main:app --host 0.0.0.0 --port ${PORT} --workers 1
