@@ -1079,7 +1079,7 @@ async function startEpubImport() {
   epubLog(`Uploading ${file.name}...`, 'info');
 
   try {
-    const resp = await fetch('/api/ingest/epub', { method: 'POST', body: formData });
+    const resp = await fetch(BASE + '/api/ingest/epub', { method: 'POST', body: formData });
     if (!resp.ok) { epubLog(`Server error: ${resp.status}`, 'error'); return; }
     const data = await resp.json();
     epubJobId = data.job_id;
@@ -1095,7 +1095,7 @@ async function startEpubImport() {
 async function pollEpubJob() {
   if (!epubJobId) return;
   try {
-    const resp = await fetch(`/api/ingest/epub/${epubJobId}?since=${epubLogOffset}`);
+    const resp = await fetch(BASE + `/api/ingest/epub/${epubJobId}?since=${epubLogOffset}`);
     if (!resp.ok) return;
     const data = await resp.json();
 
@@ -1151,7 +1151,7 @@ async function startZipImport() {
   formData.append('source', source);
 
   try {
-    const resp = await fetch('/api/ingest/zip', { method: 'POST', body: formData });
+    const resp = await fetch(BASE + '/api/ingest/zip', { method: 'POST', body: formData });
     const data = await resp.json();
     if (!resp.ok) { st.textContent = `Error: ${data.detail || resp.status}`; st.style.color = '#e87070'; return; }
     st.textContent = `✓ Imported: ${data.imported} | Skipped: ${data.skipped} | Errors: ${data.errors}`;
