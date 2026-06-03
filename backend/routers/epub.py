@@ -363,3 +363,4 @@ async def epub_job_status(job_id: str, since: int = 0):
         'log': log[since:],
         'log_total': len(log),
     }
+# cache-bust: 2026-06-03
