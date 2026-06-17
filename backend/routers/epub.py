@@ -1,5 +1,5 @@
-# backend/routers/epub.py  — v0.4.1
-# Fixes: Haiku model, bool casting, ZIP import, job-based polling, repair preserves type
+# backend/routers/epub.py — v0.5.2 rewrite
+# Retry with exponential backoff, full error messages, resume support
 
 from fastapi import APIRouter, UploadFile, File, Form, BackgroundTasks, HTTPException
 from fastapi.responses import StreamingResponse
@@ -7,26 +7,36 @@ import asyncio, zipfile, io, re, json, logging, uuid, os
 from datetime import datetime
 
 from ..db import upsert_recipe, get_recipe
-from ..llm import _anthropic, _json
+from ..llm import _anthropic, _json, MODEL_FAST
 from .recipes import _embed
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-HAIKU = "claude-haiku-4-5-20251001"
-
 # In-memory job store {job_id: {status, log, stats}}
 _jobs: dict = {}
 
-# ── Claude with Haiku ─────────────────────────────────────────────────────────
+# ── Claude call with retry + backoff ──────────────────────────────────────────
 
-async def haiku(system: str, user: str, max_tokens: int = 2000) -> str:
-    msg = await _anthropic.messages.create(
-        model=HAIKU, max_tokens=max_tokens,
-        system=system,
-        messages=[{"role": "user", "content": user}]
-    )
-    return msg.content[0].text.strip()
+async def haiku(system: str, user: str, max_tokens: int = 2000,
+                retries: int = 3, base_delay: float = 3.0) -> str:
+    """Call MODEL_FAST with exponential backoff on any error."""
+    last_err = None
+    for attempt in range(retries):
+        try:
+            msg = await _anthropic.messages.create(
+                model=MODEL_FAST, max_tokens=max_tokens,
+                system=system,
+                messages=[{"role": "user", "content": user}]
+            )
+            return msg.content[0].text.strip()
+        except Exception as e:
+            last_err = e
+            if attempt < retries - 1:
+                wait = base_delay * (2 ** attempt)  # 3s, 6s, 12s
+                logger.warning(f"[haiku] attempt {attempt+1} failed: {str(e)[:200]}. Retrying in {wait}s...")
+                await asyncio.sleep(wait)
+    raise last_err
 
 # ── EPUB parsing ──────────────────────────────────────────────────────────────
 
@@ -153,22 +163,30 @@ def log_job(job_id: str, msg: str, level: str = 'info'):
 # ── Background extraction task ────────────────────────────────────────────────
 
 async def _run_epub_import(job_id: str, epub_bytes: bytes, chunk_size: int,
-                            min_score: int, max_chunks: int, do_repair: bool, source: str, bg: BackgroundTasks):
+                            min_score: int, max_chunks: int, do_repair: bool,
+                            source: str, start_from: int, bg: BackgroundTasks):
     job = _jobs[job_id]
     job['status'] = 'running'
 
     try:
-        log_job(job_id, f"Parsing EPUB...")
+        log_job(job_id, "Parsing EPUB...")
         chunks = parse_epub(epub_bytes, chunk_size=chunk_size, min_score=min_score)
-        total = min(len(chunks), max_chunks)
-        log_job(job_id, f"Found {len(chunks)} candidate chunks, processing {total}")
+        total_available = len(chunks)
+        chunks = chunks[start_from:start_from + max_chunks]
+        total = len(chunks)
+        if start_from > 0:
+            log_job(job_id, f"Found {total_available} candidate chunks, resuming from #{start_from+1}, processing {total}")
+        else:
+            log_job(job_id, f"Found {total_available} candidate chunks, processing {total}")
         job['stats']['total_chunks'] = total
 
         extracted = []
         dedup = set()
+        failed_chunks = []
 
-        for i, chunk in enumerate(chunks[:max_chunks]):
-            log_job(job_id, f"[{i+1}/{total}] {chunk['title'][:50]}...")
+        for i, chunk in enumerate(chunks):
+            chunk_idx = start_from + i
+            log_job(job_id, f"[{i+1}/{total}] (chunk #{chunk_idx+1}) {chunk['title'][:50]}...")
             job['stats']['chunk'] = i + 1
             try:
                 raw = await haiku(EXTRACT_SYS, f"Extract recipes from this cookbook text:\n\n{chunk['text']}")
@@ -186,13 +204,17 @@ async def _run_epub_import(job_id: str, epub_bytes: bytes, chunk_size: int,
                     extracted.append((r, chunk['text']))
                     new_recipes.append(r.get('name', '?'))
                 if new_recipes:
-                    log_job(job_id, f"  ✓ {len(new_recipes)}: {', '.join(new_recipes)[:80]}", 'ok')
+                    log_job(job_id, f"  ✓ {len(new_recipes)}: {', '.join(new_recipes)[:100]}", 'ok')
             except Exception as e:
-                log_job(job_id, f"  ✗ {str(e)[:80]}", 'error')
-            await asyncio.sleep(1.0)  # Haiku rate limit
+                # Full error message — never truncate, this killed diagnosis last time
+                log_job(job_id, f"  ✗ {str(e)[:300]}", 'error')
+                failed_chunks.append(chunk_idx)
+            await asyncio.sleep(2.0)  # 2s base delay between calls (was 1s — caused rate-limit cascade)
 
-        log_job(job_id, f"Extraction done: {len(extracted)} recipes")
+        log_job(job_id, f"Extraction done: {len(extracted)} recipes from {total} chunks ({len(failed_chunks)} failed)")
         job['stats']['extracted'] = len(extracted)
+        job['stats']['failed_chunks'] = len(failed_chunks)
+        job['stats']['failed_indices'] = failed_chunks
 
         # Repair pass
         if do_repair:
@@ -207,7 +229,6 @@ async def _run_epub_import(job_id: str, epub_bytes: bytes, chunk_size: int,
                     repaired = _json(raw)
                     if isinstance(repaired, list) and repaired:
                         fixed = repaired[0]
-                        # Preserve original type if repair lost it
                         if not fixed.get('type'):
                             fixed['type'] = original_type
                         merged = {**r, **fixed}
@@ -219,8 +240,8 @@ async def _run_epub_import(job_id: str, epub_bytes: bytes, chunk_size: int,
                         steps = len(fixed.get('instructions', []))
                         log_job(job_id, f"  ✓ {ings} ing, {steps} steps", 'ok')
                 except Exception as e:
-                    log_job(job_id, f"  ✗ {str(e)[:60]}", 'error')
-                await asyncio.sleep(1.0)
+                    log_job(job_id, f"  ✗ {str(e)[:300]}", 'error')
+                await asyncio.sleep(2.0)
 
         # Import to DB
         imported, skipped = 0, 0
@@ -236,14 +257,16 @@ async def _run_epub_import(job_id: str, epub_bytes: bytes, chunk_size: int,
 
         job['stats']['imported'] = imported
         job['stats']['skipped'] = skipped
-        log_job(job_id, f"Done! Imported: {imported} | Skipped (duplicates): {skipped} | Total: {len(extracted)}", 'done')
+        log_job(job_id, f"Done! Imported: {imported} | Skipped (dupes): {skipped} | Failed chunks: {len(failed_chunks)}", 'done')
+        if failed_chunks:
+            log_job(job_id, f"To retry failed chunks, re-upload with start_from={failed_chunks[0]} or re-run the full import (already-imported recipes will be skipped).", 'info')
         job['status'] = 'done'
 
     except Exception as e:
         log_job(job_id, f"Fatal error: {str(e)}", 'error')
         job['status'] = 'error'
 
-# ── ZIP JSON import (for existing extracted ZIPs) ─────────────────────────────
+# ── ZIP JSON import ───────────────────────────────────────────────────────────
 
 @router.post("/zip")
 async def import_zip(
@@ -251,10 +274,9 @@ async def import_zip(
     file: UploadFile = File(...),
     source: str = Form("ZIP Import"),
 ):
-    """Import a ZIP of JSON recipe files (from the browser extractor tool)."""
+    """Import a ZIP of JSON recipe files."""
     zip_bytes = await file.read()
     imported, skipped, errors = 0, 0, 0
-
     try:
         with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
             json_files = [n for n in zf.namelist() if n.endswith('.json')]
@@ -263,7 +285,6 @@ async def import_zip(
                     r = json.loads(zf.read(fname))
                     if not r.get('name'):
                         continue
-                    # Convert from extractor format to Recipe Book format
                     normalized = {
                         'slug': make_slug(r.get('name', 'recipe')),
                         'name': r.get('name', ''),
@@ -274,19 +295,15 @@ async def import_zip(
                         'totalTime': r.get('totalTime'),
                         'prepTime': r.get('prepTime'),
                         'tags': r.get('tags', []),
-                        'ingredientGroups': [{
-                            'name': None,
-                            'ingredients': [
-                                _norm_ing(ing) for ing in r.get('recipeIngredient', [])
-                            ]
-                        }],
+                        'ingredientGroups': [{'name': None, 'ingredients': [
+                            _norm_ing(ing) for ing in r.get('recipeIngredient', [])
+                        ]}],
                         'instructions': [
                             {'step': i+1, 'text': s.get('text','') if isinstance(s,dict) else str(s), 'timer': None}
                             for i, s in enumerate(r.get('recipeInstructions', []))
                         ],
                         'note': r.get('notes', [{}])[0].get('text','') if r.get('notes') else '',
                     }
-                    # Quality gate — skip truly empty recipes
                     ings = len(normalized['ingredientGroups'][0]['ingredients'])
                     steps = len(normalized['instructions'])
                     if ings < 2 and steps < 1:
@@ -303,7 +320,6 @@ async def import_zip(
                     errors += 1
     except Exception as e:
         raise HTTPException(422, f"ZIP read failed: {e}")
-
     return {'imported': imported, 'skipped': skipped, 'errors': errors, 'total': imported + skipped + errors}
 
 def _norm_ing(ing) -> dict:
@@ -322,7 +338,7 @@ def _norm_ing(ing) -> dict:
         'note': ing.get('note'),
     }
 
-# ── EPUB endpoint — job-based polling ────────────────────────────────────────
+# ── EPUB endpoint — job-based polling ─────────────────────────────────────────
 
 @router.post("/epub")
 async def import_epub(
@@ -331,21 +347,23 @@ async def import_epub(
     chunk_size: int = Form(6000),
     min_score: int = Form(2),
     max_chunks: int = Form(500),
-    do_repair: str = Form('true'),   # string, cast explicitly
+    do_repair: str = Form('true'),
     source: str = Form("EPUB Import"),
+    start_from: int = Form(0),
 ):
-    """Start an EPUB import job. Returns job_id. Poll /api/ingest/epub/{job_id} for progress."""
+    """Start an EPUB import job. Returns job_id. Poll /api/ingest/epub/{job_id} for progress.
+    Use start_from=N to skip the first N chunks (for resuming after failures)."""
     epub_bytes = await file.read()
     job_id = str(uuid.uuid4())[:8]
     _jobs[job_id] = {
         'status': 'queued',
         'filename': file.filename,
         'log': [],
-        'stats': {'chunk': 0, 'total_chunks': 0, 'extracted': 0, 'imported': 0, 'skipped': 0},
+        'stats': {'chunk': 0, 'total_chunks': 0, 'extracted': 0, 'imported': 0, 'skipped': 0, 'failed_chunks': 0},
         'created': datetime.utcnow().isoformat(),
     }
     repair = do_repair.lower() in ('true', '1', 'yes')
-    bg.add_task(_run_epub_import, job_id, epub_bytes, chunk_size, min_score, max_chunks, repair, source, bg)
+    bg.add_task(_run_epub_import, job_id, epub_bytes, chunk_size, min_score, max_chunks, repair, source, start_from, bg)
     return {'job_id': job_id, 'status': 'queued'}
 
 @router.get("/epub/{job_id}")
@@ -363,4 +381,3 @@ async def epub_job_status(job_id: str, since: int = 0):
         'log': log[since:],
         'log_total': len(log),
     }
-# cache-bust: 2026-06-03
