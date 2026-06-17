@@ -9,7 +9,7 @@ export BRING_ENTITY=$(bashio::config 'bring_entity')
 export DATA_DIR="/share/recipebook"
 export BACKUP_DIR="/backup/recipebook"
 export PORT=8000
-VERSION="${APP_VERSION:-0.5.1}"
+VERSION="${APP_VERSION:-0.5.2}"
 
 mkdir -p "${DATA_DIR}" "${BACKUP_DIR}"
 

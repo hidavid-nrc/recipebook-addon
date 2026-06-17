@@ -1,6 +1,6 @@
 name: "Recipe Book"
 description: "Personal recipe library — AI search, meal planning, Bring! integration"
-version: "0.5.1"
+version: "0.5.2"
 slug: "recipe_book"
 init: false
 arch:
@@ -9,6 +9,7 @@ arch:
 startup: application
 boot: auto
 ingress: true
+ingress_stream: true
 ingress_port: 8000
 panel_icon: mdi:book-open-variant
 panel_title: Recipes
