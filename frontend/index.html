@@ -238,6 +238,7 @@ textarea.text-input{min-height:90px;resize:vertical}
     <input class="search-box" id="q" placeholder="Search…" oninput="filterCatalog()">
     <button class="voice-btn" id="voice-btn" onclick="toggleVoice()">🎤</button>
     <button class="btn btn-ghost" onclick="embedAll()" style="font-size:.6rem">Index</button>
+    <button class="btn btn-ghost" onclick="exportData()" style="font-size:.6rem">↓ Export</button>
   </div>
   <div class="voice-transcript" id="vt"></div>
   <div class="tag-filter" id="tag-filter"></div>
@@ -610,6 +611,17 @@ function renderDetail(r){
       <div class="note-saved" id="note-saved"></div>
       <button class="btn btn-ghost" style="margin-top:.4rem;width:100%" onclick="saveNote()">Save Note</button>
     </div>
+    <div class="sidebar-card">
+      <div class="section-label">Cook log</div>
+      <div id="cook-summary" style="font-size:.72rem;color:var(--muted);margin-bottom:.5rem">${cookSummaryText(r.cooks)}</div>
+      <div style="display:flex;gap:.4rem;align-items:center">
+        <select id="cook-rating" class="scale-input" style="flex:0 0 auto">
+          <option value="">★ ?</option><option value="5">★ 5</option><option value="4">★ 4</option><option value="3">★ 3</option><option value="2">★ 2</option><option value="1">★ 1</option>
+        </select>
+        <button class="btn btn-ghost" style="flex:1" onclick="markCooked()">✓ Mark cooked</button>
+      </div>
+      <div class="note-saved" id="cook-saved"></div>
+    </div>
     <div class="sidebar-card sidebar-btns">
       <button class="btn btn-primary" onclick="enterCook()">🍳 Cook Mode</button>
       <button class="btn btn-green" onclick="addToPlanner()">+ Add to Planner</button>
@@ -652,6 +664,30 @@ async function saveNote(){
     document.getElementById('note-saved').textContent='✓ Saved';
     setTimeout(()=>document.getElementById('note-saved').textContent='',2000);
   }catch(e){alert('Save failed: '+e.message)}
+}
+
+function exportData(){
+  const a=document.createElement('a');
+  a.href=BASE+'/api/export'; a.download='';
+  document.body.appendChild(a); a.click(); a.remove();
+}
+
+function cookSummaryText(c){
+  if(!c||!c.count) return 'Never cooked yet';
+  const last=c.last_cooked?(' · last '+c.last_cooked.slice(0,10)):'';
+  const avg=c.avg_rating?(' · ★'+c.avg_rating):'';
+  return `Cooked ${c.count}×${last}${avg}`;
+}
+
+async function markCooked(){
+  const sel=document.getElementById('cook-rating');
+  const rating=sel.value?parseInt(sel.value):null;
+  try{
+    const res=await api.post(`/api/recipes/${activeSlug}/cook`,{rating});
+    document.getElementById('cook-summary').textContent=cookSummaryText(res.summary);
+    document.getElementById('cook-saved').textContent='✓ Logged';
+    setTimeout(()=>document.getElementById('cook-saved').textContent='',2000);
+  }catch(e){alert('Could not log: '+e.message)}
 }
 
 async function deleteRecipe(){

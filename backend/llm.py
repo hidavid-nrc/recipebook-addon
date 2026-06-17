@@ -4,8 +4,11 @@ from openai import AsyncOpenAI
 
 _anthropic = AsyncAnthropic(api_key=os.environ.get("ANTHROPIC_API_KEY",""))
 _openai    = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY",""))
-MODEL      = "claude-sonnet-4-20250514"
-EMBED_MODEL= "text-embedding-3-small"
+
+# Model split: FAST (cheap, mechanical extraction) vs SMART (judgement).
+MODEL_SMART = os.environ.get("MODEL_SMART", "claude-sonnet-4-6")
+MODEL_FAST  = os.environ.get("MODEL_FAST",  "claude-haiku-4-5-20251001")
+EMBED_MODEL = "text-embedding-3-small"
 
 # ── Embeddings ───────────────────────────────────────────────
 async def embed(text: str) -> list[float]:
@@ -29,17 +32,21 @@ def recipe_text(r: dict) -> str:
     return " · ".join(p for p in parts if p)
 
 # ── Claude helper ─────────────────────────────────────────────
-async def claude(system: str, user: str, max_tokens: int = 4096) -> str:
+async def claude(system: str, user: str, max_tokens: int = 4096, model: str | None = None) -> str:
     msg = await _anthropic.messages.create(
-        model=MODEL, max_tokens=max_tokens,
+        model=model or MODEL_SMART, max_tokens=max_tokens,
         system=system,
         messages=[{"role":"user","content":user}]
     )
     return msg.content[0].text.strip()
 
 def _json(text: str):
-    clean = text.lstrip("```json").lstrip("```").rstrip("```").strip()
-    return json.loads(clean)
+    clean = text.strip()
+    if clean.startswith("```"):
+        clean = clean.split("```", 2)[1] if "```" in clean[3:] else clean[3:]
+        if clean.startswith("json"): clean = clean[4:]
+        clean = clean.rsplit("```", 1)[0]
+    return json.loads(clean.strip())
 
 # ── URL scrape ───────────────────────────────────────────────
 RECIPE_SCHEMA = """{
@@ -67,7 +74,7 @@ async def scrape_url(url: str) -> list[dict]:
     soup = BeautifulSoup(r.text, "html.parser")
     for t in soup(["script","style","nav","footer","header","aside"]): t.decompose()
     text = soup.get_text(separator="\n", strip=True)[:40000]
-    raw = await claude(SCRAPE_SYS, f"URL: {url}\n\n{text}")
+    raw = await claude(SCRAPE_SYS, f"URL: {url}\n\n{text}", model=MODEL_FAST)
     return _json(raw)
 
 # ── HTML parse ───────────────────────────────────────────────
@@ -77,7 +84,7 @@ Return a JSON array using this schema per recipe:
 Return ONLY the JSON array, no markdown."""
 
 async def parse_html(html: str) -> list[dict]:
-    raw = await claude(HTML_SYS, html[:40000])
+    raw = await claude(HTML_SYS, html[:40000], model=MODEL_FAST)
     return _json(raw)
 
 # ── Preferences ──────────────────────────────────────────────
@@ -86,7 +93,7 @@ PREFS_SYS = """Extract cooking preferences from freeform text. Return ONLY this 
  "context":"one sentence","typical_servings":2}"""
 
 async def extract_prefs(text: str) -> dict:
-    raw = await claude(PREFS_SYS, text, max_tokens=1024)
+    raw = await claude(PREFS_SYS, text, max_tokens=1024, model=MODEL_FAST)
     return _json(raw)
 
 # ── Semantic search ──────────────────────────────────────────
@@ -102,7 +109,7 @@ Preferences: {json.dumps(prefs)}
 Candidates: {json.dumps(catalog)}
 Re-rank by relevance. Return JSON array: [{{"slug":"...","reason":"..."}}]
 Return ONLY the JSON array."""
-    raw = await claude("You are a recipe recommendation engine.", rerank_prompt, max_tokens=1024)
+    raw = await claude("You are a recipe recommendation engine.", rerank_prompt, max_tokens=1024, model=MODEL_SMART)
     reranked = _json(raw)
     slug_map = {r["slug"]: r for r in scored}
     result = []
@@ -122,7 +129,7 @@ Recently cooked (avoid): {json.dumps(recent)}
 Available: {json.dumps(catalog)}
 Return JSON array: [{{"day":0,"slot":"dinner","recipe_slug":"...","servings":2,"note":"why"}}]
 day 0=Monday..6=Sunday. Return ONLY the JSON array."""
-    raw = await claude("You are a meal planning assistant.", prompt, max_tokens=2048)
+    raw = await claude("You are a meal planning assistant.", prompt, max_tokens=2048, model=MODEL_SMART)
     return _json(raw)
 
 # ── Gap analysis ─────────────────────────────────────────────
@@ -133,38 +140,38 @@ Preferences: {json.dumps(prefs)}
 Collection ({len(catalog)} recipes): {json.dumps(catalog)}
 Identify: what's well-covered, key gaps, specific recipe suggestions with sources.
 Be concrete and actionable."""
-    return await claude("You are a culinary advisor.", prompt, max_tokens=2048)
+    return await claude("You are a culinary advisor.", prompt, max_tokens=2048, model=MODEL_SMART)
 
 # ── Whisper voice transcription ──────────────────────────────
 async def transcribe_audio(audio_bytes: bytes, mime_type: str = "audio/webm") -> str:
-    """Transcribe audio using OpenAI Whisper."""
     import io
     ext = "webm" if "webm" in mime_type else "mp4" if "mp4" in mime_type else "wav"
     audio_file = io.BytesIO(audio_bytes)
     audio_file.name = f"recording.{ext}"
     transcript = await _openai.audio.transcriptions.create(
-        model="whisper-1",
-        file=audio_file,
-        language="en"
-    )
+        model="whisper-1", file=audio_file, language="en")
     return transcript.text
 
-# ── Bring! / HA todo push ────────────────────────────────────
-async def push_to_ha_todo(items: list[str], entity_id: str):
-    # SUPERVISOR_TOKEN is auto-injected by HA Supervisor when
-    # homeassistant_api: true is set in config.yaml
+# ── Bring! / HA todo push (resilient + surfaces real errors) ──
+async def push_to_ha_todo(items: list[str], entity_id: str) -> dict:
     token = os.environ.get("SUPERVISOR_TOKEN", "")
     if not token:
         raise ValueError("SUPERVISOR_TOKEN not available — ensure homeassistant_api: true in config.yaml")
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    pushed, failed = 0, []
     async with httpx.AsyncClient(timeout=15) as client:
         for item in items:
-            resp = await client.post(
-                "http://supervisor/core/api/services/todo/add_item",
-                headers=headers,
-                json={"entity_id": entity_id, "item": item}
-            )
-            resp.raise_for_status()
+            try:
+                resp = await client.post(
+                    "http://supervisor/core/api/services/todo/add_item",
+                    headers=headers,
+                    json={"entity_id": entity_id, "item": item},
+                )
+                if resp.status_code >= 400:
+                    # Surface HA's actual complaint instead of a bare 500.
+                    failed.append({"item": item, "status": resp.status_code, "error": resp.text[:300]})
+                else:
+                    pushed += 1
+            except Exception as e:
+                failed.append({"item": item, "error": str(e)[:300]})
+    return {"pushed": pushed, "failed": failed, "entity": entity_id}

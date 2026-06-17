@@ -14,7 +14,6 @@ def this_monday() -> str:
     return str(t - timedelta(days=t.weekday()))
 
 def _base_servings(data: dict) -> float:
-    """Parse base servings from yield string. '8 to 12' → 10.0, '4 servings' → 4.0"""
     yield_str = data.get("yield", "") or ""
     nums = [int(n) for n in re.findall(r"\d+", yield_str)]
     if not nums:
@@ -101,15 +100,19 @@ async def generate(body: GenerateIn):
 @router.post("/bring")
 async def send_bring(body: BringIn):
     ws = body.week_start or this_monday()
-    entity = os.environ.get("BRING_ENTITY", "todo.spezialassu")
+    entity = os.environ.get("BRING_ENTITY", "todo.mir-party")
     bring_items, _ = _build_items(ws)
     if not bring_items:
         raise HTTPException(400, "No ingredients in this week's plan")
     try:
-        await push_to_ha_todo(bring_items, entity)
+        result = await push_to_ha_todo(bring_items, entity)
     except Exception as e:
-        raise HTTPException(500, str(e))
-    return {"pushed": len(bring_items), "entity": entity}
+        raise HTTPException(502, f"Bring push failed for {entity}: {e}")
+    # Total failure → surface HA's real error (no more opaque 500s).
+    if result["pushed"] == 0 and result["failed"]:
+        first = result["failed"][0]
+        raise HTTPException(502, f"Bring push failed for entity {entity}: {first.get('error')}")
+    return result   # {"pushed": n, "failed": [...], "entity": ...}
 
 @router.get("/{week_start}/shopping-list")
 async def shopping_list(week_start: str):

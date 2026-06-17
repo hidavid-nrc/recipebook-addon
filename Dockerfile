@@ -1,4 +1,9 @@
-FROM ghcr.io/home-assistant/aarch64-base-python:3.12-alpine3.21
+ARG BUILD_FROM
+FROM ${BUILD_FROM}
+
+# Cache-bust: bump along with config.yaml version to force a clean rebuild
+ARG BUILD_VERSION=0.5.0
+ENV APP_VERSION=${BUILD_VERSION}
 
 WORKDIR /app
 COPY backend/requirements.txt .

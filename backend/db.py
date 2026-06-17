@@ -1,8 +1,10 @@
-import sqlite3, json, os
+import sqlite3, json, os, glob
 from pathlib import Path
+from datetime import datetime
 
-DATA_DIR = os.environ.get("DATA_DIR", "/data")
-DB_PATH  = os.path.join(DATA_DIR, "recipes.db")
+DATA_DIR   = os.environ.get("DATA_DIR", "/share/recipebook")
+BACKUP_DIR = os.environ.get("BACKUP_DIR", "/backup/recipebook")
+DB_PATH    = os.path.join(DATA_DIR, "recipes.db")
 
 def get_conn():
     conn = sqlite3.connect(DB_PATH)
@@ -46,6 +48,14 @@ def init_db():
                 updated_at      TEXT DEFAULT (datetime('now'))
             );
             INSERT OR IGNORE INTO preferences(id) VALUES(1);
+            CREATE TABLE IF NOT EXISTS cook_log (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                recipe_slug TEXT REFERENCES recipes(slug) ON DELETE CASCADE,
+                cooked_at   TEXT DEFAULT (datetime('now')),
+                rating      INTEGER CHECK(rating BETWEEN 1 AND 5),
+                notes       TEXT DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_cook_log_slug ON cook_log(recipe_slug);
         """)
 
 # ── Recipes ──────────────────────────────────────────────────
@@ -69,18 +79,23 @@ def get_recipe(slug: str) -> dict | None:
         row = c.execute("SELECT * FROM recipes WHERE slug=?", (slug,)).fetchone()
         return _r(row) if row else None
 
-def list_recipes(search: str = "", tags: list = []) -> list:
+def list_recipes(search: str = "", tags: list = [], rtype: str = "") -> list:
+    """Text search now also matches the JSON blob (ingredients, instructions,
+    notes) — not just name/source — closing the old 'weak search' gap."""
     with get_conn() as c:
         q = "SELECT * FROM recipes"
         p = []
         if search:
-            q += " WHERE (name LIKE ? OR source LIKE ?)"
-            p = [f"%{search}%", f"%{search}%"]
+            q += " WHERE (name LIKE ? OR source LIKE ? OR data LIKE ?)"
+            like = f"%{search}%"
+            p = [like, like, like]
         q += " ORDER BY name ASC"
         rows = c.execute(q, p).fetchall()
     result = [_r(r) for r in rows]
     if tags:
         result = [r for r in result if any(t in r["tags"] for t in tags)]
+    if rtype:
+        result = [r for r in result if (r["data"].get("subtitle") or "") == rtype]
     return result
 
 def delete_recipe(slug: str):
@@ -90,6 +105,20 @@ def delete_recipe(slug: str):
 def save_embedding(slug: str, vec: list):
     with get_conn() as c:
         c.execute("UPDATE recipes SET embedding=? WHERE slug=?", (json.dumps(vec), slug))
+
+def all_recipes_export() -> list:
+    """Full export payload — recipe data + note, embeddings excluded (regenerable)."""
+    with get_conn() as c:
+        rows = c.execute("SELECT slug,data,created_at,updated_at FROM recipes ORDER BY name").fetchall()
+        notes = {r["recipe_slug"]: r["note"] for r in c.execute("SELECT * FROM notes").fetchall()}
+    out = []
+    for row in rows:
+        d = json.loads(row["data"])
+        d["_note"] = notes.get(row["slug"], "")
+        d["_created_at"] = row["created_at"]
+        d["_updated_at"] = row["updated_at"]
+        out.append(d)
+    return out
 
 def _r(row) -> dict:
     d = dict(row)
@@ -110,6 +139,45 @@ def save_note(slug: str, note: str):
             INSERT INTO notes(recipe_slug, note) VALUES(?,?)
             ON CONFLICT(recipe_slug) DO UPDATE SET note=excluded.note, updated_at=datetime('now')
         """, (slug, note))
+
+# ── Cook log / ratings ───────────────────────────────────────
+def add_cook(slug: str, rating: int | None = None, notes: str = "") -> dict:
+    with get_conn() as c:
+        cur = c.execute(
+            "INSERT INTO cook_log(recipe_slug,rating,notes) VALUES(?,?,?)",
+            (slug, rating, notes or ""))
+        cid = cur.lastrowid
+        row = c.execute("SELECT * FROM cook_log WHERE id=?", (cid,)).fetchone()
+        return dict(row)
+
+def get_cooks(slug: str) -> list:
+    with get_conn() as c:
+        rows = c.execute(
+            "SELECT * FROM cook_log WHERE recipe_slug=? ORDER BY cooked_at DESC", (slug,)).fetchall()
+        return [dict(r) for r in rows]
+
+def cook_summary(slug: str) -> dict:
+    """Shape consumed by the frontend's cookSummaryText()."""
+    with get_conn() as c:
+        row = c.execute("""
+            SELECT COUNT(*) AS count,
+                   MAX(cooked_at) AS last_cooked,
+                   ROUND(AVG(rating), 1) AS avg_rating
+            FROM cook_log WHERE recipe_slug=?
+        """, (slug,)).fetchone()
+    d = dict(row)
+    if not d["count"]:
+        return {"count": 0, "last_cooked": None, "avg_rating": None}
+    return d
+
+def recent_cooks(limit: int = 50) -> list:
+    with get_conn() as c:
+        rows = c.execute("""
+            SELECT cl.*, r.name AS recipe_name
+            FROM cook_log cl LEFT JOIN recipes r ON cl.recipe_slug = r.slug
+            ORDER BY cl.cooked_at DESC LIMIT ?
+        """, (limit,)).fetchall()
+        return [dict(r) for r in rows]
 
 # ── Meal Plan ────────────────────────────────────────────────
 def get_week(week_start: str) -> list:
@@ -151,3 +219,22 @@ def save_prefs(raw: str, structured: dict):
             UPDATE preferences SET raw_text=?, structured_json=?, updated_at=datetime('now')
             WHERE id=1
         """, (raw, json.dumps(structured)))
+
+# ── Backup (safe for a live WAL database) ────────────────────
+def backup_db(keep: int = 14) -> str | None:
+    """Consistent online backup via VACUUM INTO. Returns the backup path."""
+    if not os.path.exists(DB_PATH):
+        return None
+    Path(BACKUP_DIR).mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d")
+    dest = os.path.join(BACKUP_DIR, f"recipes_{stamp}.db")
+    with get_conn() as c:
+        if os.path.exists(dest):
+            os.remove(dest)
+        c.execute("VACUUM INTO ?", (dest,))
+    # prune old backups, keep newest N
+    backups = sorted(glob.glob(os.path.join(BACKUP_DIR, "recipes_*.db")))
+    for old in backups[:-keep]:
+        try: os.remove(old)
+        except OSError: pass
+    return dest

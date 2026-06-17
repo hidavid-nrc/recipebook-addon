@@ -1,6 +1,6 @@
 name: "Recipe Book"
 description: "Personal recipe library — AI search, meal planning, Bring! integration"
-version: "0.4.1"
+version: "0.5.0"
 slug: "recipe_book"
 init: false
 arch:
@@ -17,10 +17,12 @@ hassio_api: true
 options:
   anthropic_api_key: ""
   openai_api_key: ""
-  bring_entity: "todo.spezialassu"
+  bring_entity: "todo.mir-party"
 schema:
   anthropic_api_key: str
   openai_api_key: str
   bring_entity: str
 map:
   - data:rw
+  - share:rw
+  - backup:rw
