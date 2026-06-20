@@ -331,6 +331,13 @@ textarea.text-input{min-height:90px;resize:vertical}
       <button class="btn btn-primary" onclick="ingestFiles()">Upload</button>
       <div class="status" id="file-st"></div>
     </div>
+    <div class="ingest-card">
+      <h3>From YouTube</h3>
+      <p>Paste a YouTube video URL — Claude extracts the recipe from transcript & description.</p>
+      <input class="text-input" id="yt-in" placeholder="https://youtu.be/... or https://youtube.com/watch?v=..." style="margin-bottom:.5rem">
+      <button class="btn btn-primary" onclick="ingestYouTube()">Import</button>
+      <div class="status" id="yt-st"></div>
+    </div>
   </div>
 </div>
 
@@ -388,6 +395,54 @@ textarea.text-input{min-height:90px;resize:vertical}
       <div id="epub-progress-bar" style="height:100%;width:0%;background:var(--yellow);border-radius:2px;transition:width .3s"></div>
     </div>
     <div id="epub-log" style="background:#111;color:#c8c0a8;font-family:'IBM Plex Mono',monospace;font-size:.7rem;padding:.75rem;border-radius:6px;height:280px;overflow-y:auto;line-height:1.5"></div>
+  </div>
+
+  <!-- PDF Import -->
+  <div style="margin-top:1.5rem">
+    <div class="section-label">PDF Cookbook Import</div>
+    <p style="font-size:.78rem;color:var(--muted);margin-bottom:.75rem">Upload a PDF cookbook. Claude extracts recipes page by page. For appliance cookbooks (Cook Expert, Thermomix), enable Appliance Mode to preserve device-specific instructions.</p>
+    <div style="background:var(--surface);border-radius:8px;padding:1rem;margin-bottom:1rem">
+      <div style="margin-bottom:.75rem">
+        <label style="font-size:.7rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);display:block;margin-bottom:.35rem">PDF File</label>
+        <input type="file" id="pdf-file" accept=".pdf" style="font-size:.8rem;color:var(--paper)">
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:.75rem;margin-bottom:.75rem">
+        <div>
+          <label style="font-size:.65rem;color:var(--muted);display:block;margin-bottom:.2rem">Max chunks</label>
+          <input type="number" id="pdf-max-chunks" value="300" min="10" max="1000" step="10"
+            style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:.35rem .5rem;color:var(--paper);font-size:.8rem">
+        </div>
+        <div>
+          <label style="font-size:.65rem;color:var(--muted);display:block;margin-bottom:.2rem">Min recipe score</label>
+          <input type="number" id="pdf-min-score" value="2" min="0" max="5"
+            style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:.35rem .5rem;color:var(--paper);font-size:.8rem">
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:.75rem;margin-bottom:.75rem">
+        <label style="display:flex;align-items:center;gap:.4rem;font-size:.78rem;cursor:pointer">
+          <input type="checkbox" id="pdf-repair" checked> Repair partials
+        </label>
+        <label style="display:flex;align-items:center;gap:.4rem;font-size:.78rem;cursor:pointer">
+          <input type="checkbox" id="pdf-appliance"> Appliance mode (Cook Expert etc.)
+        </label>
+      </div>
+      <div style="margin-bottom:.75rem">
+        <label style="font-size:.65rem;color:var(--muted);display:block;margin-bottom:.2rem">Source label</label>
+        <input type="text" id="pdf-source" placeholder="e.g. Magimix Cook Expert Cookbook"
+          style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:.35rem .5rem;color:var(--paper);font-size:.8rem">
+      </div>
+      <button class="btn btn-primary" id="pdf-start-btn" onclick="startPdfImport()">📄 Start PDF Import</button>
+    </div>
+    <div id="pdf-progress-wrap" style="display:none">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.4rem">
+        <span style="font-size:.7rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--accent)">Progress</span>
+        <span id="pdf-stats" style="font-size:.72rem;color:var(--muted)"></span>
+      </div>
+      <div style="height:4px;background:var(--border);border-radius:2px;margin-bottom:.75rem">
+        <div id="pdf-progress-bar" style="height:100%;width:0%;background:var(--yellow);border-radius:2px;transition:width .3s"></div>
+      </div>
+      <div id="pdf-log" style="background:#111;color:#c8c0a8;font-family:'IBM Plex Mono',monospace;font-size:.7rem;padding:.75rem;border-radius:6px;height:280px;overflow-y:auto;line-height:1.5"></div>
+    </div>
   </div>
 
   <!-- ZIP Import -->
@@ -1054,6 +1109,19 @@ async function ingestFiles(){
   }catch(e){setSt('file','Error: '+e.message,'err');}
 }
 
+async function ingestYouTube(){
+  const url=document.getElementById('yt-in').value.trim();
+  if(!url) return;
+  setSt('yt','Fetching transcript & extracting recipe… (may take ~30s)','loading');
+  try{
+    const r=await api.post('/api/ingest/youtube',{url});
+    const names=r.names||[];
+    setSt('yt',`✓ Imported ${r.imported} recipe${r.imported>1?'s':''} (via ${r.source_type}): ${names.join(', ')}`, 'ok');
+    document.getElementById('yt-in').value='';
+    recipes=await api.get('/api/recipes');
+  }catch(e){setSt('yt','Error: '+e.message,'err');}
+}
+
 async function embedAll(){
   const btn=event.target;
   btn.disabled=true;btn.textContent='⏳';
@@ -1069,7 +1137,7 @@ function x(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').re
 function fmtDur(iso){if(!iso)return '';const h=iso.match(/(\d+)H/),m=iso.match(/(\d+)M/);return [h?`${h[1]}h`:'',m?`${m[1]}m`:''].filter(Boolean).join(' ')}
 
 function setSt(key,msg,type){
-  const ids={prefs:'prefs-status',url:'url-st',html:'html-st',json:'json-st',file:'file-st'};
+  const ids={prefs:'prefs-status',url:'url-st',html:'html-st',json:'json-st',file:'file-st',yt:'yt-st'};
   const el=document.getElementById(ids[key]);
   if(!el) return;
   el.className=`status ${type}`;el.textContent=msg;
@@ -1169,6 +1237,86 @@ function stopEpubImport() {
   document.getElementById('epub-start-btn').disabled = false;
   document.getElementById('epub-stop-btn').style.display = 'none';
   epubLog('Stopped. Import continues server-side until current chunk finishes.', 'info');
+}
+
+// ── PDF Import ────────────────────────────────────────────────────────────────
+let pdfJobId = null;
+let pdfPollTimer = null;
+let pdfLogOffset = 0;
+
+function pdfLog(msg, level='info') {
+  const log = document.getElementById('pdf-log');
+  if (!log) return;
+  const colors = {info:'#c8c0a8', ok:'#a8d5a2', error:'#e88', done:'#ffd700'};
+  const line = document.createElement('div');
+  line.style.color = colors[level] || colors.info;
+  line.textContent = msg;
+  log.appendChild(line);
+  log.scrollTop = log.scrollHeight;
+}
+
+async function startPdfImport() {
+  const fileInput = document.getElementById('pdf-file');
+  if (!fileInput.files.length) { alert('Select a PDF file'); return; }
+  const file = fileInput.files[0];
+  if (!file.name.toLowerCase().endsWith('.pdf')) { alert('Please select a .pdf file'); return; }
+
+  const source = document.getElementById('pdf-source').value || file.name.replace(/\.pdf$/i,'');
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('min_score', document.getElementById('pdf-min-score').value);
+  formData.append('max_chunks', document.getElementById('pdf-max-chunks').value);
+  formData.append('do_repair', document.getElementById('pdf-repair').checked ? 'true' : 'false');
+  formData.append('appliance_mode', document.getElementById('pdf-appliance').checked ? 'true' : 'false');
+  formData.append('source', source);
+
+  document.getElementById('pdf-start-btn').disabled = true;
+  document.getElementById('pdf-progress-wrap').style.display = 'block';
+  document.getElementById('pdf-log').innerHTML = '';
+  document.getElementById('pdf-progress-bar').style.width = '0%';
+  pdfLogOffset = 0;
+
+  pdfLog(`Uploading ${file.name}...`, 'info');
+
+  try {
+    const resp = await fetch(BASE + '/api/ingest/pdf', { method: 'POST', body: formData });
+    if (!resp.ok) { pdfLog(`Server error: ${resp.status}`, 'error'); document.getElementById('pdf-start-btn').disabled = false; return; }
+    const data = await resp.json();
+    pdfJobId = data.job_id;
+    pdfLog(`Job started: ${pdfJobId}`, 'info');
+    pdfPollTimer = setInterval(pollPdfJob, 1500);
+  } catch(e) {
+    pdfLog(`Upload failed: ${e.message}`, 'error');
+    document.getElementById('pdf-start-btn').disabled = false;
+  }
+}
+
+async function pollPdfJob() {
+  if (!pdfJobId) return;
+  try {
+    const r = await api.get(`/api/ingest/pdf/${pdfJobId}?since=${pdfLogOffset}`);
+    if (r.log) {
+      for (const entry of r.log) { pdfLog(entry.msg, entry.level); }
+      pdfLogOffset += r.log.length;
+    }
+    if (r.stats) {
+      const s = r.stats;
+      const pct = s.total_chunks ? Math.round((s.chunk / s.total_chunks) * 100) : 0;
+      document.getElementById('pdf-progress-bar').style.width = pct + '%';
+      document.getElementById('pdf-stats').textContent =
+        `Chunk ${s.chunk}/${s.total_chunks} · Extracted: ${s.extracted} · Imported: ${s.imported}`;
+    }
+    if (r.status === 'done' || r.status === 'error') {
+      clearInterval(pdfPollTimer);
+      pdfPollTimer = null;
+      document.getElementById('pdf-start-btn').disabled = false;
+      if (r.status === 'done') {
+        recipes = await api.get('/api/recipes');
+      }
+    }
+  } catch(e) {
+    pdfLog(`Poll error: ${e.message}`, 'error');
+  }
 }
 
 // ── ZIP JSON import ───────────────────────────────────────────────────────────
