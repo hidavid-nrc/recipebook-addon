@@ -46,7 +46,37 @@ def _json(text: str):
         clean = clean.split("```", 2)[1] if "```" in clean[3:] else clean[3:]
         if clean.startswith("json"): clean = clean[4:]
         clean = clean.rsplit("```", 1)[0]
-    return json.loads(clean.strip())
+    clean = clean.strip()
+
+    # Try direct parse first
+    try:
+        return json.loads(clean)
+    except json.JSONDecodeError:
+        pass
+
+    # Repair attempt: truncated JSON (hit max_tokens mid-array)
+    # Find the last complete object in a JSON array
+    if clean.startswith("["):
+        # Find last '}' that could close an object, then close the array
+        last_brace = clean.rfind("}")
+        if last_brace > 0:
+            candidate = clean[:last_brace + 1] + "]"
+            try:
+                result = json.loads(candidate)
+                if isinstance(result, list):
+                    return result
+            except json.JSONDecodeError:
+                pass
+
+    # Repair attempt: trailing commas
+    import re as _re
+    repaired = _re.sub(r',\s*([}\]])', r'\1', clean)
+    try:
+        return json.loads(repaired)
+    except json.JSONDecodeError:
+        pass
+
+    raise json.JSONDecodeError(f"Could not parse LLM response as JSON (len={len(clean)})", clean, 0)
 
 # ── URL scrape ───────────────────────────────────────────────
 RECIPE_SCHEMA = """{

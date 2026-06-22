@@ -119,7 +119,7 @@ async def import_youtube(body: YouTubeIn, bg: BackgroundTasks):
     source_type = "transcript+description" if (transcript and description) else ("transcript" if transcript else "description")
 
     try:
-        raw = await claude(YOUTUBE_SYS, combined, max_tokens=4096, model=MODEL_FAST)
+        raw = await claude(YOUTUBE_SYS, combined, max_tokens=8192, model=MODEL_FAST)
         recipes = _json(raw)
         if not isinstance(recipes, list):
             recipes = [recipes] if isinstance(recipes, dict) else []

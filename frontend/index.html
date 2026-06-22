@@ -159,6 +159,8 @@ textarea.text-input{min-height:90px;resize:vertical}
 .recipe-opt{padding:.55rem .7rem;border:1px solid var(--rule);border-radius:3px;cursor:pointer;
   margin-bottom:.35rem;font-size:.8rem;transition:all .15s}
 .recipe-opt:hover{border-color:var(--accent);background:var(--paper)}
+.recipe-opt-current{border-color:var(--yellow);background:var(--surface);font-weight:700}
+.recipe-opt-current::before{content:'✓ ';color:var(--yellow)}
 .recipe-opt .opt-src{font-size:.6rem;color:var(--muted);letter-spacing:.1em;text-transform:uppercase}
 
 /* ── PREFS ── */
@@ -502,7 +504,7 @@ textarea.text-input{min-height:90px;resize:vertical}
 <script>
 // ── State ─────────────────────────────────────────────────
 let recipes=[], activeSlug=null, detailR=null, baseServings=2;
-let weekStart=monday(new Date()), pendingSlot=null, activeTags=new Set();
+let weekStart=monday(new Date()), pendingSlot=null, activeTags=new Set(), weekSlots={};
 let cookSteps=[], cookIdx=0, cookTimers={}, wakeLock=null;
 let isListening=false, recognition=null, mediaRecorder=null, audioChunks=[];
 
@@ -934,6 +936,7 @@ function fmtWeek(ws){
 
 function renderWeek(slots){
   const m={};slots.forEach(s=>{m[`${s.day}-${s.slot}`]=s;});
+  weekSlots=m;
   const sd=new Date(weekStart);
   document.getElementById('week-grid').innerHTML=DAYS.map((dn,di)=>{
     const dt=new Date(sd);dt.setDate(dt.getDate()+di);
@@ -955,21 +958,25 @@ function renderWeek(slots){
 
 function openPicker(day,slot){
   pendingSlot={day,slot};
+  const current=weekSlots[`${day}-${slot}`];
+  const currentSlug=current?.recipe_slug||null;
   document.getElementById('picker-title').textContent=`${DAYS[day]} · ${slot}`;
   document.getElementById('picker-q').value='';
-  renderPickerOpts(recipes);
+  renderPickerOpts(recipes, currentSlug);
   document.getElementById('picker').style.display='flex';
 }
 
 function closePicker(){document.getElementById('picker').style.display='none';}
 
-function filterPicker(){const q=document.getElementById('picker-q').value.toLowerCase();renderPickerOpts(recipes.filter(r=>r.name.toLowerCase().includes(q)));}
+function filterPicker(){const q=document.getElementById('picker-q').value.toLowerCase();const current=pendingSlot?weekSlots[`${pendingSlot.day}-${pendingSlot.slot}`]:null;renderPickerOpts(recipes.filter(r=>r.name.toLowerCase().includes(q)),current?.recipe_slug);}
 
-function renderPickerOpts(list){
-  document.getElementById('picker-opts').innerHTML=list.map(r=>`
-    <div class="recipe-opt" onclick="selectSlot('${r.slug}')">
+function renderPickerOpts(list, currentSlug){
+  const container=document.getElementById('picker-opts');
+  container.innerHTML=list.map(r=>`
+    <div class="recipe-opt${r.slug===currentSlug?' recipe-opt-current':''}" id="pick-${r.slug}" onclick="selectSlot('${r.slug}')">
       ${r.source?`<div class="opt-src">${x(r.source)}</div>`:''}${x(r.name)}
     </div>`).join('');
+  if(currentSlug){const el=document.getElementById('pick-'+currentSlug);if(el){el.scrollIntoView({block:'center',behavior:'auto'});}}
 }
 
 async function selectSlot(slug){
