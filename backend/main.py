@@ -5,9 +5,9 @@ from fastapi.responses import HTMLResponse
 from pathlib import Path
 
 from .db import init_db, backup_db
-from .routers import recipes, ingest, planner, preferences, voice, proxy, epub, export, youtube, pdf_import
+from .routers import recipes, ingest, planner, preferences, voice, proxy, epub, export, youtube, pdf_import, admin
 
-app = FastAPI(title="Recipe Book", version="0.6.0")
+app = FastAPI(title="Recipe Book", version="0.6.3")
 
 @app.middleware("http")
 async def ingress_root_path(request: Request, call_next):
@@ -48,6 +48,7 @@ app.include_router(proxy.router,       prefix="/api/proxy")
 app.include_router(export.router,      prefix="/api/export")
 app.include_router(youtube.router,     prefix="/api/ingest")
 app.include_router(pdf_import.router,  prefix="/api/ingest")
+app.include_router(admin.router,       prefix="/api/admin")
 
 FRONTEND = Path(__file__).parent.parent / "frontend"
 app.mount("/static", StaticFiles(directory=str(FRONTEND / "static")), name="static")

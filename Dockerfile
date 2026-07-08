@@ -2,7 +2,7 @@ ARG BUILD_FROM
 FROM ${BUILD_FROM}
 
 # Cache-bust: bump along with config.yaml version to force a clean rebuild
-ARG BUILD_VERSION=0.6.1
+ARG BUILD_VERSION=0.6.3
 ENV APP_VERSION=${BUILD_VERSION}
 
 WORKDIR /app

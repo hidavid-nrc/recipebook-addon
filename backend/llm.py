@@ -76,7 +76,32 @@ def _json(text: str):
     except json.JSONDecodeError:
         pass
 
-    raise json.JSONDecodeError(f"Could not parse LLM response as JSON (len={len(clean)})", clean, 0)
+    # Repair attempt: response has prose/commentary before or around the JSON
+    # (e.g. "Here's the extracted recipe:\n\n[...]" or a trailing note after —
+    # this is the case that produces "line 1 column 1 (char 0)" failures)
+    for open_ch, close_ch in (("[", "]"), ("{", "}")):
+        start = clean.find(open_ch)
+        if start == -1:
+            continue
+        end = clean.rfind(close_ch)
+        if end == -1 or end <= start:
+            continue
+        candidate = clean[start:end + 1]
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            # try the truncation-repair on this narrowed candidate too
+            if open_ch == "[":
+                last_brace = candidate.rfind("}")
+                if last_brace > 0:
+                    try:
+                        result = json.loads(candidate[:last_brace + 1] + "]")
+                        if isinstance(result, list):
+                            return result
+                    except json.JSONDecodeError:
+                        pass
+
+    raise json.JSONDecodeError(f"Could not parse LLM response as JSON (len={len(clean)}, starts: {clean[:80]!r})", clean, 0)
 
 # ── URL scrape ───────────────────────────────────────────────
 RECIPE_SCHEMA = """{
