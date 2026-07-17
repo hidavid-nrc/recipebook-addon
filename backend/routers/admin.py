@@ -68,3 +68,53 @@ async def tag_report():
         "distinct_tags": len(counts),
         "tags": sorted(counts.items(), key=lambda x: -x[1]),
     }
+
+@router.get("/quality-report")
+async def quality_report():
+    """Read-only: find genuinely broken recipes vs. legitimate sparse content.
+    A `technique`/`sauce`/`marinade` with few ingredients is FINE. A `recipe`
+    with no steps or <2 ingredients is broken."""
+    with get_conn() as c:
+        rows = c.execute("SELECT slug, name, data FROM recipes").fetchall()
+    broken, thin_recipes, empty_steps = [], [], []
+    for row in rows:
+        d = json.loads(row["data"])
+        subtitle = d.get("subtitle") or "recipe"
+        ings = sum(len(g.get("ingredients", [])) for g in d.get("ingredientGroups", []))
+        steps = len(d.get("instructions", []))
+        # Only judge type=recipe strictly; techniques/sauces can be sparse.
+        if subtitle == "recipe":
+            if steps == 0 and ings < 2:
+                broken.append({"slug": row["slug"], "name": row["name"], "ings": ings, "steps": steps})
+            elif ings < 2:
+                thin_recipes.append({"slug": row["slug"], "name": row["name"], "ings": ings, "steps": steps})
+            elif steps == 0:
+                empty_steps.append({"slug": row["slug"], "name": row["name"], "ings": ings, "steps": steps})
+    return {
+        "total": len(rows),
+        "fully_broken": {"count": len(broken), "items": broken},
+        "thin_no_ingredients": {"count": len(thin_recipes), "items": thin_recipes[:50]},
+        "no_steps": {"count": len(empty_steps), "items": empty_steps[:50]},
+    }
+
+@router.post("/delete-broken")
+async def delete_broken(confirm: bool = False):
+    """Delete type=recipe entries that are fully broken (0 steps AND <2 ingredients).
+    Requires confirm=true. Takes a backup first. Techniques/sauces never touched."""
+    if not confirm:
+        raise HTTPException(400, "Pass confirm=true to actually delete. Run /quality-report first.")
+    backup_path = backup_db()
+    with get_conn() as c:
+        rows = c.execute("SELECT slug, data FROM recipes").fetchall()
+        to_delete = []
+        for row in rows:
+            d = json.loads(row["data"])
+            if (d.get("subtitle") or "recipe") != "recipe":
+                continue
+            ings = sum(len(g.get("ingredients", [])) for g in d.get("ingredientGroups", []))
+            steps = len(d.get("instructions", []))
+            if steps == 0 and ings < 2:
+                to_delete.append(row["slug"])
+        for slug in to_delete:
+            c.execute("DELETE FROM recipes WHERE slug=?", (slug,))
+    return {"backup": backup_path, "deleted": len(to_delete), "slugs": to_delete}

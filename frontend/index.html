@@ -581,14 +581,32 @@ function renderFilterTags(){
 
 function toggleTag(t){activeTags.has(t)?activeTags.delete(t):activeTags.add(t); filterCatalog(); renderFilterTags();}
 
+let searchTimer=null;
 function filterCatalog(){
-  const q=document.getElementById('q').value.toLowerCase();
-  const filtered=recipes.filter(r=>{
-    const mt=!q||r.name.toLowerCase().includes(q)||(r.source||'').toLowerCase().includes(q);
-    const mg=activeTags.size===0||[...activeTags].every(t=>(r.tags||[]).includes(t));
-    return mt&&mg;
-  });
-  renderCatalog(filtered);
+  clearTimeout(searchTimer);
+  searchTimer=setTimeout(runCatalogSearch, 220);
+}
+async function runCatalogSearch(){
+  const q=document.getElementById('q').value.trim();
+  try{
+    // Backend search matches name, source, ingredients AND instructions.
+    const base = q ? `/api/recipes?search=${encodeURIComponent(q)}` : '/api/recipes';
+    let list = await api.get(base);
+    // Apply active tag chips client-side on the returned set.
+    if(activeTags.size){
+      list = list.filter(r=>[...activeTags].every(t=>(r.tags||[]).includes(t)));
+    }
+    renderCatalog(list);
+  }catch(e){
+    console.error(e);
+    // Fallback to in-memory name/source filter if the request fails.
+    const ql=q.toLowerCase();
+    renderCatalog(recipes.filter(r=>{
+      const mt=!ql||r.name.toLowerCase().includes(ql)||(r.source||'').toLowerCase().includes(ql);
+      const mg=activeTags.size===0||[...activeTags].every(t=>(r.tags||[]).includes(t));
+      return mt&&mg;
+    }));
+  }
 }
 
 function renderCatalog(list){
