@@ -7,7 +7,7 @@ from pathlib import Path
 from .db import init_db, backup_db
 from .routers import recipes, ingest, planner, preferences, voice, proxy, epub, export, youtube, pdf_import, admin
 
-app = FastAPI(title="Recipe Book", version="0.6.4")
+app = FastAPI(title="Recipe Book", version="0.6.5")
 
 @app.middleware("http")
 async def ingress_root_path(request: Request, call_next):

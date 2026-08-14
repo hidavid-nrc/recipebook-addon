@@ -118,3 +118,123 @@ async def delete_broken(confirm: bool = False):
         for slug in to_delete:
             c.execute("DELETE FROM recipes WHERE slug=?", (slug,))
     return {"backup": backup_path, "deleted": len(to_delete), "slugs": to_delete}
+
+# ── Recipe repair (missing steps / missing ingredients) ───────────────────────
+import asyncio
+from ..llm import claude, _json, MODEL_FAST
+
+REPAIR_STEPS_SYS = """You are reconstructing cooking instructions for a recipe that has a
+complete ingredient list but lost its method during a prior data-extraction pass.
+You do NOT have the original source text — only the recipe name, source, tags, and
+ingredient list. Write a plausible, technically sound method consistent with
+standard technique for this dish and cuisine.
+
+Return ONLY a JSON array of steps: [{"step": 1, "text": "...", "timer": null}]
+Use metric units (g, ml, °C) where relevant. Be concrete about heat level, timing,
+and order of operations. Return ONLY the JSON array, no markdown."""
+
+REPAIR_INGREDIENTS_SYS = """You are reconstructing an ingredient list for a recipe that lost
+its ingredients during a prior data-extraction pass. You do NOT have the original
+source text — only the recipe name, source, tags, and any existing instructions.
+Infer a plausible, complete ingredient list consistent with the dish and cuisine.
+
+Return ONLY a JSON array: [{"raw":"200g beef, thinly sliced","quantity":200,"unit":"g","food":"beef","note":"thinly sliced","display":"200g beef, thinly sliced"}]
+Use metric units. Return ONLY the JSON array, no markdown."""
+
+RECONSTRUCTED_NOTE = "⚠️ AI-reconstructed: the original source text was lost before this could be re-extracted verbatim. This {field} was inferred by Haiku from the recipe's {basis} — verify against the source cookbook before relying on it."
+
+@router.post("/repair-recipes")
+async def repair_recipes(dry_run: bool = False, confirm: bool = False):
+    """Repair recipes with missing steps (has ingredients, 0 instructions) or
+    missing ingredients (0 ingredients, has instructions/name). Uses Haiku to
+    RECONSTRUCT plausible content from what IS present — this is not a re-extraction
+    from source (that text no longer exists), so every repaired field is flagged
+    in the recipe's note for manual verification. Takes a backup first (real run only).
+    """
+    if not dry_run and not confirm:
+        raise HTTPException(400, "Pass confirm=true for a real run, or dry_run=true to preview.")
+
+    with get_conn() as c:
+        rows = c.execute("SELECT slug, name, data FROM recipes").fetchall()
+
+    targets = []
+    for row in rows:
+        d = json.loads(row["data"])
+        if (d.get("subtitle") or "recipe") != "recipe":
+            continue
+        ings = sum(len(g.get("ingredients", [])) for g in d.get("ingredientGroups", []))
+        steps = len(d.get("instructions", []))
+        if steps == 0 and ings >= 2:
+            targets.append(("steps", row["slug"], d))
+        elif ings == 0 and steps >= 1:
+            targets.append(("ingredients", row["slug"], d))
+
+    if dry_run:
+        return {
+            "dry_run": True,
+            "would_repair": len(targets),
+            "missing_steps": len([t for t in targets if t[0] == "steps"]),
+            "missing_ingredients": len([t for t in targets if t[0] == "ingredients"]),
+            "slugs": [t[1] for t in targets],
+        }
+
+    if not targets:
+        return {"repaired": 0, "message": "Nothing to repair."}
+
+    backup_path = backup_db()
+    repaired, failed = [], []
+
+    for kind, slug, d in targets:
+        try:
+            if kind == "steps":
+                ing_text = "\n".join(
+                    i.get("raw", i.get("display", i.get("food", "")))
+                    for g in d.get("ingredientGroups", []) for i in g.get("ingredients", [])
+                )
+                prompt = f"Recipe: {d.get('name')}\nSource: {d.get('source','')}\nTags: {', '.join(d.get('tags',[]))}\n\nIngredients:\n{ing_text}"
+                raw = await claude(REPAIR_STEPS_SYS, prompt, max_tokens=2048, model=MODEL_FAST)
+                steps = _json(raw)
+                # Validate shape before trusting it — this repairs real content, no silent garbage.
+                valid = isinstance(steps, list) and steps and all(
+                    isinstance(s, dict) and s.get("text") for s in steps
+                )
+                if valid:
+                    d["instructions"] = steps
+                    d["note"] = (d.get("note") or "") + "\n" + RECONSTRUCTED_NOTE.format(field="method", basis="ingredient list")
+                    repaired.append(slug)
+                else:
+                    failed.append({"slug": slug, "error": "Haiku response failed shape validation (steps)"})
+            else:  # missing ingredients
+                steps_text = "\n".join(f"{s.get('step','')}. {s.get('text','')}" for s in d.get("instructions", []))
+                prompt = f"Recipe: {d.get('name')}\nSource: {d.get('source','')}\nTags: {', '.join(d.get('tags',[]))}\n\nExisting steps:\n{steps_text}"
+                raw = await claude(REPAIR_INGREDIENTS_SYS, prompt, max_tokens=2048, model=MODEL_FAST)
+                ings_list = _json(raw)
+                valid = isinstance(ings_list, list) and ings_list and all(
+                    isinstance(i, dict) and i.get("food") for i in ings_list
+                )
+                if valid:
+                    d["ingredientGroups"] = [{"name": None, "ingredients": ings_list}]
+                    d["note"] = (d.get("note") or "") + "\n" + RECONSTRUCTED_NOTE.format(field="ingredient list", basis="recipe name and existing steps")
+                    repaired.append(slug)
+                else:
+                    failed.append({"slug": slug, "error": "Haiku response failed shape validation (ingredients)"})
+        except Exception as e:
+            failed.append({"slug": slug, "error": str(e)[:200]})
+
+        await asyncio.sleep(2.0)  # match existing rate-limit discipline
+
+        if slug in repaired:
+            with get_conn() as c:
+                c.execute(
+                    "UPDATE recipes SET data=?, tags=?, updated_at=datetime('now') WHERE slug=?",
+                    (json.dumps(d), json.dumps(d.get("tags", [])), slug)
+                )
+
+    return {
+        "backup": backup_path,
+        "attempted": len(targets),
+        "repaired": len(repaired),
+        "failed": len(failed),
+        "failed_details": failed,
+        "repaired_slugs": repaired,
+    }
